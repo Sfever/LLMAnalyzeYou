@@ -599,6 +599,8 @@ screen navigation():
 
             textbutton _("Overview") action ShowMenu("overview")
 
+            textbutton _("Memories") action ShowMenu("memories")
+
         textbutton _("Load") action ShowMenu("load")
 
         textbutton _("Preferences") action ShowMenu("preferences")
@@ -650,6 +652,7 @@ screen main_menu():
     tag menu
 
     add gui.main_menu_background
+    add Solid("#00000066")
 
     ## This empty frame darkens the main menu.
     frame:
@@ -680,8 +683,7 @@ style main_menu_version is main_menu_text
 style main_menu_frame:
     xsize 840
     yfill True
-
-    background "gui/overlay/main_menu_test.jpg"
+    
 
 style main_menu_vbox:
     xalign 1.0
@@ -717,6 +719,8 @@ screen game_menu(title, scroll=None, yinitial=0.0, spacing=0):
         add gui.main_menu_background
     else:
         add gui.game_menu_background
+
+    add Solid("#00000055")
 
     frame:
         style "game_menu_outer_frame"
@@ -797,8 +801,6 @@ style game_menu_outer_frame:
     bottom_padding 90
     top_padding 360
 
-    background "gui/overlay/game_menu.png"
-
 style game_menu_navigation_frame:
     xsize 840
     yfill True
@@ -840,24 +842,32 @@ screen overview():
         style_prefix "overview"
 
         vbox:
-            spacing gui.pref_spacing
+            spacing 45
 
-            
-            
+            hbox:
+                spacing 90
+
+                use overview_main
+                use recap
 
 screen overview_main():
-    tag menu
-    text "[llm_model] as [selected_character]"
-    text _("Summary provided by [llm_summarize_model].")
+    vbox:
+        spacing gui.pref_spacing
+
+        label _("Current Session")
+        text "[llm_model] as [selected_character]"
+        text _("Summary provided by [llm_summarize_model].")
 
 screen recap():
-    tag menu
-    style_prefix "overview"
     $ SUMMARY_PREFIX = "Following is a conversation summary. Use it as context for future interactions.\n\nSummary:\n"
     $ history = llm_get_history()
     $ summary = history[0]["content"][len(SUMMARY_PREFIX):] if history and history[0]["role"] == "system" and history[0]["content"].startswith(SUMMARY_PREFIX) else _("No summary available yet.")
-    label _("Session Recap")
-    text summary
+
+    vbox:
+        spacing gui.pref_spacing
+
+        label _("Session Recap")
+        text summary
 
 style overview_label is gui_label
 style overview_label_text is gui_label_text
@@ -1322,6 +1332,67 @@ screen chat_settings():
                         value llm_backend_python_value
                         length 260
                         copypaste True
+
+
+screen memories():
+
+    tag menu
+
+    default llm_new_memory_value = VariableInputValue("llm_new_memory_text", default=False)
+
+    use game_menu(_("Memories"), scroll="viewport"):
+        frame:
+            style "memory_panel"
+
+            vbox:
+                spacing gui.pref_spacing
+
+                label _("Persistent Memories")
+
+                if llm_persistent_context:
+                    for i, mem in enumerate(llm_persistent_context):
+                        hbox:
+                            spacing 20
+
+                            text mem
+                            textbutton _("Delete") action Function(llm_delete_memory, i)
+                else:
+                    text _("No persistent memories yet.")
+
+                button:
+                    style "empty"
+                    xfill True
+                    action [DisableAllInputValues(), llm_new_memory_value.Enable()]
+
+                    vbox:
+                        spacing 8
+
+                        text _("Add New Memory"):
+                            style "chat_settings_text"
+
+                        input:
+                            style "chat_settings_input"
+                            value llm_new_memory_value
+                            length 280
+                            copypaste True
+
+                textbutton _("Save Memory"):
+                    action [
+                        Function(llm_add_memory, llm_new_memory_text),
+                        SetVariable("llm_new_memory_text", ""),
+                        DisableAllInputValues(),
+                    ]
+
+
+style memory_panel is empty
+
+style memory_panel:
+    xfill True
+    top_padding 18
+    bottom_padding 18
+    left_padding 24
+    right_padding 24
+    background Solid("#00000055")
 
 
 ## History screen ##############################################################

@@ -3,8 +3,6 @@ import json
 import sys
 from pathlib import Path
 
-from llm import chat
-
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -46,10 +44,30 @@ def _parse_tool_arguments(arguments):
 
 class RenPyPipeBackend:
 	def __init__(self, config_path: str):
-		self.chat_client = chat(config_path)
+		self.chat_client = None
+		self.startup_error = None
+		try:
+			from llm import chat
+			self.chat_client = chat(config_path)
+		except Exception as error:
+			self.startup_error = error
 
 	def close(self):
-		self.chat_client.close()
+		if self.chat_client is not None:
+			self.chat_client.close()
+
+	def _raise_startup_error(self):
+		if self.startup_error is None:
+			return
+
+		error = self.startup_error
+		if isinstance(error, ModuleNotFoundError) and getattr(error, "name", "") == "sqlite3":
+			raise RuntimeError(
+				"The configured backend interpreter does not provide sqlite3. "
+				"Set the in-game Python Interpreter setting to a full Python install that includes sqlite3."
+			) from error
+
+		raise RuntimeError(f"Backend startup failed: {error}") from error
 
 	def _validate_messages(self, request):
 		messages = request
@@ -72,6 +90,7 @@ class RenPyPipeBackend:
 		return messages
 
 	def handle_request(self, request):
+		self._raise_startup_error()
 		messages = self._validate_messages(request)
 		response = self.chat_client.renpy_chat(messages)
 		message = response.choices[0].message
@@ -87,6 +106,7 @@ class RenPyPipeBackend:
 		}
 
 	def stream_request(self, request):
+		self._raise_startup_error()
 		messages = self._validate_messages(request)
 		response_stream = self.chat_client.renpy_stream_chat(messages)
 		full_content = []

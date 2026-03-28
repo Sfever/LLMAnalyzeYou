@@ -30,6 +30,9 @@ define config.version = "1.0"
 ## triple-quotes, and leave a blank line between paragraphs.
 
 define gui.about = _p("""
+This is not a medical product. DO NOT rely on this on diagnosing. Always seek professional help for medical or psychological concerns. LLM can be hallucinatory, so be cautious.
+
+Open Source under the MIT License
 """)
 
 
@@ -159,9 +162,11 @@ default llm_model = "openrouter/free"
 default llm_summarize_model="openrouter/free"
 default llm_embedding_model=""
 default llm_backend_python = "python"
+default llm_rag_save_with_slots = False
 default llm_verbose_logging = True
 default selected_character = "Yahata Umiri"
 default llm_persistent_context = []
+default llm_new_memory_text = ""
 
 ## Save directory ##############################################################
 ##

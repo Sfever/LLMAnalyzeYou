@@ -3,7 +3,6 @@ import time
 from config_reader import config
 from rag import rag
 from pathlib import Path
-from threading import Thread
 import json
 SUMMARY_PREFIX="Following is a conversation summary. Use it as context for future interactions.\n\nSummary:\n"
 BASE_DIR = Path(__file__).resolve().parent
@@ -18,7 +17,7 @@ RENPY_TOOLS = [
                 "properties": {
                     "character": {
                         "type": "string",
-                        "description": "The Ren'Py character or image tag to update, for example 'blue'.",
+                        "description": "The Ren'Py character or image tag to update, for example 'blue'. All in lowercase",
                     },
                     "expression": {
                         "type": "string",
@@ -55,8 +54,30 @@ class chat:
     def should_summarize(self, messages:list[dict]) -> bool:
         return len(messages) > self.config.context_window * 1.5
 
-    def summarize_messages(self, messages:list[dict], system_prompt:list[dict]) -> list[dict]:
+    def _system_prompt_messages(self, messages:list[dict]) -> list[dict]:
+        system_messages = []
+
+        for message in messages:
+            if message.get("role") != "system":
+                break
+
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if content.startswith(SUMMARY_PREFIX):
+                continue
+
+            system_messages.append({"role": "system", "content": content})
+
+        if system_messages:
+            return system_messages
+        if self.system_prompt:
+            return [{"role": "system", "content": self.system_prompt}]
+        return []
+
+    def summarize_messages(self, messages:list[dict]) -> list[dict]:
         recent_messages = messages[-self.config.context_window:]
+        system_prompt = self._system_prompt_messages(messages)
         try:
             summary = self.summarize_memory(messages)
         except openai.APIError:
@@ -136,7 +157,8 @@ class chat:
             if used_memories_count > self.config.context_window:
                 break
             transcript.append(f"{speaker}: {content.strip()}")
-        Thread(target=self.rag_instance.add_memories, args=(memory_list, metadata_list), daemon=True).start()
+        if memory_list:
+            self.rag_instance.add_memories(memory_list, metadata_list)
         return "\n".join(transcript[:self.config.context_window])
 
     def _latest_text_content(self, messages:list[dict]) -> str:
@@ -242,13 +264,13 @@ class chat:
     
     def renpy_chat(self, messages:list[dict]):
         if self.should_summarize(messages):
-            messages=self.summarize_messages(messages, [{"role":"system","content":self.system_prompt}])
+            messages=self.summarize_messages(messages)
         response=self.chat_completation(messages, stream=False)
         return response
 
     def renpy_stream_chat(self, messages:list[dict]):
         if self.should_summarize(messages):
-            messages=self.summarize_messages(messages, [{"role":"system","content":self.system_prompt}])
+            messages=self.summarize_messages(messages)
         return self.chat_completation(messages, stream=True)
 
         

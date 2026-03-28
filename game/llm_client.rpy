@@ -2,7 +2,7 @@ init python:
     import copy
     import json
     import os
-    import sqlite3
+    import shutil
     import subprocess
     import sys
     import threading
@@ -13,10 +13,12 @@ init python:
 
     _LLM_PAGE_CHAR_LIMIT = 200
     _LLM_DEBUG_LOG_LIMIT = 80
+    _LLM_PERSISTENT_MEMORY_HEADER = "Persistent user memories. Treat these as durable context provided by the user for future interactions."
 
 
     def _llm_ensure_store_defaults():
         defaults = {
+            "llm_api_key": "",
             "llm_chat_history": [],
             "llm_live_text": "",
             "llm_stream_done": False,
@@ -25,16 +27,37 @@ init python:
             "llm_stream_error": "",
             "llm_page_texts": [],
             "llm_current_page": 0,
+            "llm_model": "openrouter/free",
+            "llm_summarize_model": "openrouter/free",
+            "llm_embedding_model": "",
             "llm_backend_python": "python",
+            "llm_rag_save_with_slots": False,
             "llm_backend_max_tool_rounds": 4,
             "llm_verbose_logging": True,
             "llm_debug_lines": [],
             "llm_request_state": "",
+            "selected_character": "Yahata Umiri",
+            "llm_persistent_context": [],
+            "llm_new_memory_text": "",
         }
         for name, value in defaults.items():
             if not hasattr(store, name):
                 setattr(store, name, copy.deepcopy(value))
+    def llm_delete_memory(value):
+        if hasattr(store, "llm_persistent_context"):
+            llm_persistent_context = getattr(store, "llm_persistent_context")
+            if 0 <= value < len(llm_persistent_context):
+                llm_persistent_context.pop(value)
 
+    def llm_add_memory(value):
+        memory_text = (value or "").strip()
+        if not memory_text:
+            return
+
+        if not hasattr(store, "llm_persistent_context"):
+            setattr(store, "llm_persistent_context", [])
+
+        getattr(store, "llm_persistent_context").append(memory_text)
 
     def _llm_get(name, default=None):
         if not hasattr(store, name):
@@ -121,6 +144,10 @@ init python:
         return os.path.join(_llm_rag_snapshot_dir(), _llm_safe_slot_name(slot_name) + ".sqlite3")
 
 
+    def _llm_rag_snapshot_aux_path(slot_name, suffix):
+        return _llm_rag_snapshot_path(slot_name) + suffix
+
+
     def _llm_slot_name(name, page=None, slot=False):
         if slot:
             return str(name)
@@ -135,47 +162,76 @@ init python:
         return "%s-%s" % (page_name, name)
 
 
-    def _llm_sqlite_backup(source_path, target_path):
-        source_connection = None
-        target_connection = None
-        temp_path = target_path + ".tmp"
+    def _llm_copy_file(source_path, target_path):
+        source_dir = os.path.dirname(source_path)
+        if source_dir and not os.path.exists(source_path):
+            return False
 
         target_dir = os.path.dirname(target_path)
         if target_dir and not os.path.isdir(target_dir):
             os.makedirs(target_dir)
 
-        for candidate in (temp_path,):
-            if os.path.exists(candidate):
-                os.unlink(candidate)
+        temp_path = target_path + ".tmp"
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
-        try:
-            source_connection = sqlite3.connect(source_path)
-            try:
-                source_connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except Exception:
-                pass
-
-            target_connection = sqlite3.connect(temp_path)
-            source_connection.backup(target_connection)
-        finally:
-            if target_connection is not None:
-                target_connection.close()
-            if source_connection is not None:
-                source_connection.close()
-
+        shutil.copy2(source_path, temp_path)
         os.replace(temp_path, target_path)
+        return True
+
+
+    def _llm_remove_file_if_exists(path):
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+    def _llm_snapshot_rag_files(source_path, slot_name):
+        copied_any = False
+        copied_any = _llm_copy_file(source_path, _llm_rag_snapshot_path(slot_name)) or copied_any
+
+        for suffix in ("-wal", "-shm", "-journal"):
+            copied_any = _llm_copy_file(source_path + suffix, _llm_rag_snapshot_aux_path(slot_name, suffix)) or copied_any
+
+        return copied_any
+
+
+    def _llm_restore_rag_files(slot_name, target_path):
+        snapshot_path = _llm_rag_snapshot_path(slot_name)
+        if not os.path.exists(snapshot_path):
+            return False
+
+        target_dir = os.path.dirname(target_path)
+        if target_dir and not os.path.isdir(target_dir):
+            os.makedirs(target_dir)
+
+        _llm_copy_file(snapshot_path, target_path)
+
+        for suffix in ("-wal", "-shm", "-journal"):
+            snapshot_aux_path = _llm_rag_snapshot_aux_path(slot_name, suffix)
+            target_aux_path = target_path + suffix
+            if os.path.exists(snapshot_aux_path):
+                _llm_copy_file(snapshot_aux_path, target_aux_path)
+            else:
+                _llm_remove_file_if_exists(target_aux_path)
+
+        return True
 
 
     def _llm_snapshot_rag_for_slot(slot_name):
+        if not _llm_get("llm_rag_save_with_slots", False):
+            _llm_log("Skipping RAG snapshot for %s because save-with-slots is disabled." % slot_name)
+            return False
+
         source_path = _llm_rag_db_path()
-        snapshot_path = _llm_rag_snapshot_path(slot_name)
 
         if not os.path.exists(source_path):
             _llm_log("Skipping RAG snapshot for %s because %s does not exist." % (slot_name, source_path))
             return False
 
         try:
-            _llm_sqlite_backup(source_path, snapshot_path)
+            if not _llm_snapshot_rag_files(source_path, slot_name):
+                _llm_log("Skipping RAG snapshot for %s because no database files were available." % slot_name)
+                return False
             _llm_log("Saved RAG snapshot for slot %s." % slot_name)
             return True
         except Exception as error:
@@ -184,6 +240,10 @@ init python:
 
 
     def _llm_restore_rag_from_slot(slot_name):
+        if not _llm_get("llm_rag_save_with_slots", False):
+            _llm_log("Skipping RAG restore for %s because save-with-slots is disabled." % slot_name)
+            return False
+
         snapshot_path = _llm_rag_snapshot_path(slot_name)
         target_path = _llm_rag_db_path()
 
@@ -191,20 +251,8 @@ init python:
             _llm_log("No RAG snapshot found for slot %s." % slot_name)
             return False
 
-        target_dir = os.path.dirname(target_path)
-        if target_dir and not os.path.isdir(target_dir):
-            os.makedirs(target_dir)
-
-        for suffix in ("-wal", "-shm", "-journal"):
-            candidate = target_path + suffix
-            if os.path.exists(candidate):
-                try:
-                    os.unlink(candidate)
-                except Exception:
-                    pass
-
         try:
-            _llm_sqlite_backup(snapshot_path, target_path)
+            _llm_restore_rag_files(slot_name, target_path)
             _llm_log("Restored RAG snapshot from slot %s." % slot_name)
             return True
         except Exception as error:
@@ -230,6 +278,9 @@ init python:
 
 
     def _llm_snapshot_latest_autosave():
+        if not _llm_get("llm_rag_save_with_slots", False):
+            return
+
         slot_name = renpy.newest_slot(r"auto-")
         if slot_name:
             _llm_snapshot_rag_for_slot(slot_name)
@@ -237,6 +288,17 @@ init python:
 
     def llm_file_save_action(name, page=None, confirm=True, newest=True, cycle=False, slot=False):
         slot_name = _llm_slot_name(name, page=page, slot=slot)
+        if _llm_get("llm_rag_save_with_slots", False):
+            return FileSave(
+                name,
+                confirm=confirm,
+                newest=newest,
+                page=page,
+                cycle=cycle,
+                slot=slot,
+                action=Function(_llm_snapshot_rag_for_slot, slot_name),
+            )
+
         return FileSave(
             name,
             confirm=confirm,
@@ -244,7 +306,6 @@ init python:
             page=page,
             cycle=cycle,
             slot=slot,
-            action=Function(_llm_snapshot_rag_for_slot, slot_name),
         )
 
 
@@ -258,6 +319,11 @@ init python:
             cycle=cycle,
             slot=slot,
         )
+
+        if not _llm_get("llm_rag_save_with_slots", False):
+            if confirm and not main_menu:
+                return Confirm(_("Load save?"), load_action, None)
+            return load_action
 
         if confirm and not main_menu:
             return Confirm(
@@ -288,6 +354,7 @@ init python:
         config_data["api_key"] = store.llm_api_key
         chat_config["model"] = store.llm_model or "default"
         rag_config["embedding_model"] = store.llm_embedding_model or rag_config.get("embedding_model", "default")
+        rag_config["save_with_slots"] = bool(store.llm_rag_save_with_slots)
         summary_config["model"] = store.llm_summarize_model or "default"
 
         memory_config["summary"] = summary_config
@@ -442,6 +509,63 @@ init python:
         return copy.deepcopy(_llm_get("llm_chat_history", []))
 
 
+    def _llm_persistent_memory_block():
+        memories = []
+        for memory_text in _llm_get("llm_persistent_context", []):
+            memory_text = str(memory_text or "").strip()
+            if memory_text:
+                memories.append(memory_text)
+
+        if not memories:
+            return None
+
+        lines = [_LLM_PERSISTENT_MEMORY_HEADER, ""]
+        for index, memory_text in enumerate(memories, 1):
+            lines.append("%d. %s" % (index, memory_text))
+
+        return "\n".join(lines)
+
+
+    def _llm_request_messages(messages):
+        request_messages = copy.deepcopy(messages or [])
+        memory_block = _llm_persistent_memory_block()
+
+        if memory_block is None:
+            return request_messages
+
+        system_indexes = []
+        for index, message in enumerate(request_messages):
+            if message.get("role") != "system":
+                break
+            system_indexes.append(index)
+
+        if system_indexes:
+            first_index = system_indexes[0]
+            first_message = dict(request_messages[first_index])
+            base_content = str(first_message.get("content") or "")
+
+            if _LLM_PERSISTENT_MEMORY_HEADER in base_content:
+                head, _separator, _tail = base_content.partition("\n\n" + _LLM_PERSISTENT_MEMORY_HEADER)
+                base_content = head.rstrip()
+
+            if base_content:
+                first_message["content"] = base_content + "\n\n" + memory_block
+            else:
+                first_message["content"] = memory_block
+
+            request_messages[first_index] = first_message
+            return request_messages
+
+        request_messages.insert(
+            0,
+            {
+                "role": "system",
+                "content": memory_block,
+            },
+        )
+        return request_messages
+
+
     def _llm_resolve_history_character(speaker):
         try:
             add_history = object.__getattribute__(speaker, "add_history")
@@ -567,7 +691,14 @@ init python:
 
     def _llm_change_expression(character, expression):
         image_name = "%s %s" % (character, expression)
-        renpy.show(image_name, tag=character)
+        if not renpy.has_image(image_name, exact=True):
+            return {
+                "ok": False,
+                "error": "Unknown expression image: %s" % image_name,
+                "character": character,
+                "expression": expression,
+            }
+        renpy.show(image_name, tag=character, at_list=[character_sprite])
         renpy.restart_interaction()
         return {
             "ok": True,
@@ -587,8 +718,8 @@ init python:
                 "next_step": "Continue the conversation with the user in your next assistant message.",
             }
 
-        character = str(arguments.get("character", "")).strip()
-        expression = str(arguments.get("expression", "")).strip()
+        character = str(arguments.get("character", "")).strip().lower()
+        expression = str(arguments.get("expression", "")).strip().lower()
         if not character or not expression:
             return {
                 "ok": False,
@@ -787,8 +918,9 @@ init python:
 
         try:
             while True:
+                request_messages = _llm_request_messages(working_messages)
                 _llm_log("Starting request round %d." % (tool_rounds + 1))
-                result = _llm_run_single_request(working_messages)
+                result = _llm_run_single_request(request_messages)
                 content = result.get("content", "")
                 tool_calls = result.get("tool_calls") or []
 
